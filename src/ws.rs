@@ -211,7 +211,26 @@ impl Stream for WarpStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Ready(Some(res)) => match res {
-                Ok(item) => Poll::Ready(Some(Ok(item.into_bytes()))),
+                Ok(item) => {
+                    // Filter out non-binary messages (close, ping, pong)
+                    if item.is_binary() {
+                        let bytes = item.into_bytes();
+                        // Ignore empty messages
+                        if bytes.is_empty() {
+                            Poll::Ready(None)
+                        } else {
+                            Poll::Ready(Some(Ok(bytes)))
+                        }
+                    } else if item.is_close() {
+                        // WebSocket close frame received - end the stream gracefully
+                        Poll::Ready(None)
+                    } else {
+                        // Ignore ping/pong and text messages, continue reading
+                        // Wake up the task to poll again
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                },
                 Err(e) => Poll::Ready(Some(Err(Error::Other(e.into())))),
             },
         }

@@ -151,10 +151,12 @@ impl BroadcastGroup {
                 while let Ok(msg) = receiver.recv().await {
                     let mut sink = sink.lock().await;
                     if let Err(e) = sink.send(msg).await {
-                        println!("broadcast failed to sent sync message");
+                        // Connection closed or error occurred - exit gracefully
+                        tracing::debug!("sink closed, ending broadcast task: {}", e);
                         return Err(Error::Other(Box::new(e)));
                     }
                 }
+                // Receiver closed normally
                 Ok(())
             })
         };
@@ -162,7 +164,25 @@ impl BroadcastGroup {
             let awareness = self.awareness().clone();
             tokio::spawn(async move {
                 while let Some(res) = stream.next().await {
-                    let msg = Message::decode_v1(&res.map_err(|e| Error::Other(Box::new(e)))?)?;
+                    // Handle stream errors - convert to Error type
+                    let data = res.map_err(|e| Error::Other(Box::new(e)))?;
+
+                    // Ignore empty messages (shouldn't happen after WarpStream fixes, but defensive)
+                    if data.is_empty() {
+                        tracing::debug!("received empty message, ignoring");
+                        continue;
+                    }
+
+                    // Try to decode the message
+                    let msg = match Message::decode_v1(&data) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            tracing::warn!("failed to deserialize message (len={}): {}", data.len(), e);
+                            // Don't fail the entire connection for one bad message
+                            continue;
+                        }
+                    };
+
                     let reply = Self::handle_msg(&protocol, &awareness, msg).await?;
                     match reply {
                         None => {}
@@ -174,6 +194,7 @@ impl BroadcastGroup {
                         }
                     }
                 }
+                // Stream closed normally
                 Ok(())
             })
         };
